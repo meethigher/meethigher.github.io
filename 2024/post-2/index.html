@@ -1,0 +1,290 @@
+<!doctype html><html lang=en dir=ltr><head><meta charset=utf-8><meta name=viewport content="width=device-width,user-scalable=no,initial-scale=1,maximum-scale=1,minimum-scale=1"><meta http-equiv=X-UA-Compatible content="ie=edge"><meta name=keywords content="小记 Vert.x 的 Pipe 都做了什么,hugo,blog,developer,programmer,life"><meta name=description content="最近我在思考一个问题。在长连接的使用场景中，为了及时释放空闲资源，通常会配置空闲超时机制。
+这种机制应用于单个连接（比如一个 TCP 或 HTTP 连接）时，自然没问题。然而，如果放在一整条通信链路中，链路上的各个节点分别配置了不同的空闲超时参数，会发生什么情况呢？
+我在一次实施中就遇到了类似的情况：当请求在发送后一段时间（大约 1 分钟）再次发起时，系统就会报错。由于我负责的是链路最下游的部分，无法直接查看上游节点的配置，只能推测可能是由于链路中各节点的空闲超时设置不一致所致。最终，我尝试将我这边的 idleTimeout 设置为永不超时，问题随之消失。我猜测，是上游没有监测到我的超时断开，进而导致的问题。
+虽然问题得以解决，但具体成因仍然只是我的猜测，也没有权力知道全貌。因此为了验证这个猜想，我决定基于 Java 的 Vert.x 框架，模拟并分析这类链路中因空闲超时不一致而导致的问题。"><title>小记 Vert.x 的 Pipe 都做了什么 - Hugo-Theme-Starry</title><script src=/js/theme-init.min.js></script><link rel=stylesheet href=/css/main.min.css></head><body><header><div class=header-container><span class=header-title title="The night sky hides all the light away, leaving only the stars to think of you again and again in the darkness.">Hugo-Theme-Starry</span><nav id=headerNav><ul><li><a href=/>Home</a></li><li><a href=/categories/>Categories</a></li><li><a href=/tags/>Tags</a></li><li><a aria-current=true class=ancestor href=/archives/>Archives</a></li><li><a href=/about/>About</a></li></ul></nav><button id=mobileHeaderMenu class=mobile-header-menu aria-expanded=false>
+<svg class="header-menu-list-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><title>Open menu list</title><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+<svg class="header-menu-close-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><title>Close menu list</title><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></header><main><div class=main-container><div class="single single-two-col"><div class=single-left id=singleLeft><div class=single-categories><a class=tag href=/categories/demo/>Demo</a></div><div class=single-title>小记 Vert.x 的 Pipe 都做了什么</div><div class=single-divider></div><div class=single-meta><div class=single-dates><time class=single-date-item datetime=2024-12-01T17:52:37+08:00>2024-12-01 17:52:37 · Published</time>
+<time class=single-date-item datetime=2026-02-25T15:52:06+08:00>2026-02-25 15:52:06 · Updated</time></div><div class=single-tags><a class=tag href=/tags/go/>Go</a>
+<a class=tag href=/tags/work/>Work</a>
+<a class=tag href=/tags/java/>Java</a>
+<a class=tag href=/tags/life/>Life</a></div></div><div class=single-note>This article is continuously updated and revised. The latest version shall prevail. Reproduction or citation requires clear attribution to the author and a link to the original source.</div><div class=single-post><div><span class=post-bookmark>Summary</span></div><p>最近我在思考一个问题。在长连接的使用场景中，为了及时释放空闲资源，通常会配置空闲超时机制。</p><p>这种机制应用于单个连接（比如一个 TCP 或 HTTP 连接）时，自然没问题。然而，如果放在一整条通信链路中，链路上的各个节点分别配置了不同的空闲超时参数，会发生什么情况呢？</p><p>我在一次实施中就遇到了类似的情况：当请求在发送后一段时间（大约 1 分钟）再次发起时，系统就会报错。由于我负责的是链路最下游的部分，无法直接查看上游节点的配置，只能推测可能是由于链路中各节点的空闲超时设置不一致所致。最终，我尝试将我这边的 <code>idleTimeout</code> 设置为永不超时，问题随之消失。我猜测，是上游没有监测到我的超时断开，进而导致的问题。</p><p>虽然问题得以解决，但具体成因仍然只是我的猜测，也没有权力知道全貌。因此为了验证这个猜想，我决定基于 Java 的 Vert.x 框架，模拟并分析这类链路中因空闲超时不一致而导致的问题。</p><div><span class=post-bookmark>Content</span></div><h1 id=一背景>一、背景</h1><p>最近我在思考一个问题。在长连接的使用场景中，为了及时释放空闲资源，通常会配置空闲超时机制。</p><p>这种机制应用于单个连接（比如一个 TCP 或 HTTP 连接）时，自然没问题。然而，如果放在一整条通信链路中，链路上的各个节点分别配置了不同的空闲超时参数，会发生什么情况呢？</p><p>我在一次实施中就遇到了类似的情况：当请求在发送后一段时间（大约 1 分钟）再次发起时，系统就会报错。由于我负责的是链路最下游的部分，无法直接查看上游节点的配置，只能推测可能是由于链路中各节点的空闲超时设置不一致所致。最终，我尝试将我这边的 <code>idleTimeout</code> 设置为永不超时，问题随之消失。我猜测，是上游没有监测到我的超时断开，进而导致的问题。</p><p>虽然问题得以解决，但具体成因仍然只是我的猜测，也没有权力知道全貌。因此为了验证这个猜想，我决定基于 Java 的 Vert.x 框架，模拟并分析这类链路中因空闲超时不一致而导致的问题。</p><p>首先了解TCP通信的三次握手、四次挥手。我在下面简单画一下。如何进行抓包可以参考<a href=https://meethigher.top/blog/2024/tcp-state/>TCP状态以及CLOSE_WAIT问题排查 - 言成言成啊</a></p><p>三次握手</p><div class=code-block><div class=code-block-header><span class=code-lang>sh</span>
+<span class=code-copy><svg width="1em" height="1em" fill="none" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M21 3.5V17a2 2 0 01-2 2h-2v-2h2V3.5H9v2h5.857c1.184.0 2.143.895 2.143 2v13c0 1.105-.96 2-2.143 2H5.143C3.959 22.5 3 21.605 3 20.5v-13c0-1.105.96-2 2.143-2H7v-2a2 2 0 012-2h10a2 2 0 012 2m-6.143 4H5.143v13h9.714z" clip-rule="evenodd"/></svg></span></div><div class=code-block-content><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span><span class=lnt>7
+</span><span class=lnt>8
+</span><span class=lnt>9
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-sh data-lang=sh><span class=line><span class=cl>主动建立方                                              被动建立方
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span> ------------------ SYN --------------------------&gt; <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span> &lt;--------------- SYN + ACK ----------------------- <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span> ------------------ ACK --------------------------&gt; <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>连接建立成功                                     连接建立成功</span></span></code></pre></td></tr></table></div></div></div></div><p>四次挥手</p><div class=code-block><div class=code-block-header><span class=code-lang>sh</span>
+<span class=code-copy><svg width="1em" height="1em" fill="none" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M21 3.5V17a2 2 0 01-2 2h-2v-2h2V3.5H9v2h5.857c1.184.0 2.143.895 2.143 2v13c0 1.105-.96 2-2.143 2H5.143C3.959 22.5 3 21.605 3 20.5v-13c0-1.105.96-2 2.143-2H7v-2a2 2 0 012-2h10a2 2 0 012 2m-6.143 4H5.143v13h9.714z" clip-rule="evenodd"/></svg></span></div><div class=code-block-content><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-sh data-lang=sh><span class=line><span class=cl>主动关闭方                                             被动关闭方
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span> ------------------ FIN --------------------------&gt; <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span> &lt;------------------ ACK -------------------------- <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span>              等待服务器准备关闭                     <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span> &lt;----------------- FIN + ACK --------------------- <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span> ------------------ ACK --------------------------&gt; <span class=p>|</span>
+</span></span><span class=line><span class=cl>   <span class=p>|</span>                                                    <span class=p>|</span>
+</span></span><span class=line><span class=cl>连接关闭成功                                     连接关闭成功</span></span></code></pre></td></tr></table></div></div></div></div><blockquote><p>不过在实际使用时，主动关闭方会发送<code>FIN+ACK</code>给被动关闭方。这也是符合规范的。</p></blockquote><h1 id=二实践>二、实践</h1><h2 id=21-实现>2.1 实现</h2><p>本文代码<a href=https://github.com/meethigher/bug-test/tree/vertx-network-disconnect>meethigher/bug-test at vertx-network-disconnect</a></p><p>网络链路<code>user --[a conn]-- proxyServer/proxyClient --[b conn]-- backendServer</code>，我现在有三台机器，分别用来模拟链路中的三个角色。</p><ul><li><code>backendServer</code>: 192.168.1.223<ul><li>永不超时</li></ul></li><li><code>proxyServer/proxyClient</code>: 192.168.1.103<ul><li><code>proxyServer</code>: 永不超时</li><li><code>proxyClient</code>: 5秒空闲超时</li></ul></li><li><code>user</code>: 192.168.1.105<ul><li>永不超时</li><li>随便使用局域网一台设备即可，只需要有<code>telnet</code>命令。执行<code>telnet 192.168.1.103 8080</code>，观察<code>5秒</code>之后，连接是否会被断开</li></ul></li></ul><p><code>backendServer</code>源码</p><div class=code-block><div class=code-block-header><span class=code-lang>java</span>
+<span class=code-copy><svg width="1em" height="1em" fill="none" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M21 3.5V17a2 2 0 01-2 2h-2v-2h2V3.5H9v2h5.857c1.184.0 2.143.895 2.143 2v13c0 1.105-.96 2-2.143 2H5.143C3.959 22.5 3 21.605 3 20.5v-13c0-1.105.96-2 2.143-2H7v-2a2 2 0 012-2h10a2 2 0 012 2m-6.143 4H5.143v13h9.714z" clip-rule="evenodd"/></svg></span></div><div class=code-block-content><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=n>NetServer</span><span class=w> </span><span class=n>backendServer</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>vertx</span><span class=p>.</span><span class=na>createNetServer</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>backendServer</span><span class=p>.</span><span class=na>connectHandler</span><span class=p>(</span><span class=n>socket</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=n>socket</span><span class=p>.</span><span class=na>write</span><span class=p>(</span><span class=n>String</span><span class=p>.</span><span class=na>valueOf</span><span class=p>(</span><span class=n>System</span><span class=p>.</span><span class=na>currentTimeMillis</span><span class=p>())))</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>.</span><span class=na>listen</span><span class=p>(</span><span class=n>8888</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>.</span><span class=na>onFailure</span><span class=p>(</span><span class=n>e</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=n>System</span><span class=p>.</span><span class=na>exit</span><span class=p>(</span><span class=n>1</span><span class=p>));</span></span></span></code></pre></td></tr></table></div></div></div></div><p>下面记录使用Vertx中NetSocket的两种api来双向传输数据，以及超时导致的问题。</p><h3 id=211-handlerwrite>2.1.1 handler..write</h3><p><code>proxyServer/proxyClient</code>关键代码</p><div class=code-block><div class=code-block-header><span class=code-lang>java</span>
+<span class=code-copy><svg width="1em" height="1em" fill="none" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M21 3.5V17a2 2 0 01-2 2h-2v-2h2V3.5H9v2h5.857c1.184.0 2.143.895 2.143 2v13c0 1.105-.96 2-2.143 2H5.143C3.959 22.5 3 21.605 3 20.5v-13c0-1.105.96-2 2.143-2H7v-2a2 2 0 012-2h10a2 2 0 012 2m-6.143 4H5.143v13h9.714z" clip-rule="evenodd"/></svg></span></div><div class=code-block-content><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=n>NetServer</span><span class=w> </span><span class=n>proxyServer</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>vertx</span><span class=p>.</span><span class=na>createNetServer</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>NetClient</span><span class=w> </span><span class=n>proxyClient</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>vertx</span><span class=p>.</span><span class=na>createNetClient</span><span class=p>(</span><span class=k>new</span><span class=w> </span><span class=n>NetClientOptions</span><span class=p>()</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>.</span><span class=na>setIdleTimeoutUnit</span><span class=p>(</span><span class=n>TimeUnit</span><span class=p>.</span><span class=na>SECONDS</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>.</span><span class=na>setIdleTimeout</span><span class=p>(</span><span class=n>5</span><span class=p>));</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>proxyServer</span><span class=p>.</span><span class=na>connectHandler</span><span class=p>(</span><span class=n>a</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>a</span><span class=p>.</span><span class=na>pause</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>proxyClient</span><span class=p>.</span><span class=na>connect</span><span class=p>(</span><span class=n>8888</span><span class=p>,</span><span class=w> </span><span class=s>&#34;192.168.1.223&#34;</span><span class=p>).</span><span class=na>onFailure</span><span class=p>(</span><span class=n>e</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=n>System</span><span class=p>.</span><span class=na>exit</span><span class=p>(</span><span class=n>1</span><span class=p>))</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>.</span><span class=na>onSuccess</span><span class=p>(</span><span class=n>b</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>b</span><span class=p>.</span><span class=na>pause</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>a</span><span class=p>.</span><span class=na>handler</span><span class=p>(</span><span class=n>b</span><span class=p>::</span><span class=n>write</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>b</span><span class=p>.</span><span class=na>handler</span><span class=p>(</span><span class=n>a</span><span class=p>::</span><span class=n>write</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>a</span><span class=p>.</span><span class=na>resume</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>b</span><span class=p>.</span><span class=na>resume</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>});</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>}).</span><span class=na>listen</span><span class=p>(</span><span class=n>8080</span><span class=p>).</span><span class=na>onFailure</span><span class=p>(</span><span class=n>e</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=n>System</span><span class=p>.</span><span class=na>exit</span><span class=p>(</span><span class=n>1</span><span class=p>));</span></span></span></code></pre></td></tr></table></div></div></div></div><p>现象：<code>b连接</code>断开，<code>a连接</code>保持</p><p>tcp抓包日志截图如下，会发现<code>proxyServer/proxyClient</code>向<code>backendServer</code>发送了<code>FIN</code>，所以<code>b连接</code>断开，但是并没有向<code>user</code>发送，所以<code>a连接</code>仍然保持。</p><p><div class="img-box loading" style=aspect-ratio:2555/547;max-width:2555px;max-height:547px><img data-src=index/image-20250608135352999.png width=2555 height=547></div></p><h3 id=212-pipeto>2.1.2 pipeTo</h3><p><code>proxyServer/proxyClient</code>关键代码</p><div class=code-block><div class=code-block-header><span class=code-lang>java</span>
+<span class=code-copy><svg width="1em" height="1em" fill="none" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M21 3.5V17a2 2 0 01-2 2h-2v-2h2V3.5H9v2h5.857c1.184.0 2.143.895 2.143 2v13c0 1.105-.96 2-2.143 2H5.143C3.959 22.5 3 21.605 3 20.5v-13c0-1.105.96-2 2.143-2H7v-2a2 2 0 012-2h10a2 2 0 012 2m-6.143 4H5.143v13h9.714z" clip-rule="evenodd"/></svg></span></div><div class=code-block-content><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=n>NetServer</span><span class=w> </span><span class=n>proxyServer</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>vertx</span><span class=p>.</span><span class=na>createNetServer</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>NetClient</span><span class=w> </span><span class=n>proxyClient</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>vertx</span><span class=p>.</span><span class=na>createNetClient</span><span class=p>(</span><span class=k>new</span><span class=w> </span><span class=n>NetClientOptions</span><span class=p>()</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>.</span><span class=na>setIdleTimeoutUnit</span><span class=p>(</span><span class=n>TimeUnit</span><span class=p>.</span><span class=na>SECONDS</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>.</span><span class=na>setIdleTimeout</span><span class=p>(</span><span class=n>5</span><span class=p>));</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>proxyServer</span><span class=p>.</span><span class=na>connectHandler</span><span class=p>(</span><span class=n>a</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>a</span><span class=p>.</span><span class=na>pause</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>proxyClient</span><span class=p>.</span><span class=na>connect</span><span class=p>(</span><span class=n>8888</span><span class=p>,</span><span class=w> </span><span class=s>&#34;192.168.1.103&#34;</span><span class=p>).</span><span class=na>onFailure</span><span class=p>(</span><span class=n>e</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=n>System</span><span class=p>.</span><span class=na>exit</span><span class=p>(</span><span class=n>1</span><span class=p>))</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>.</span><span class=na>onSuccess</span><span class=p>(</span><span class=n>b</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>b</span><span class=p>.</span><span class=na>pause</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>a</span><span class=p>.</span><span class=na>pipeTo</span><span class=p>(</span><span class=n>b</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>b</span><span class=p>.</span><span class=na>pipeTo</span><span class=p>(</span><span class=n>a</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>a</span><span class=p>.</span><span class=na>resume</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>b</span><span class=p>.</span><span class=na>resume</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>});</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>}).</span><span class=na>listen</span><span class=p>(</span><span class=n>8080</span><span class=p>).</span><span class=na>onFailure</span><span class=p>(</span><span class=n>e</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=n>System</span><span class=p>.</span><span class=na>exit</span><span class=p>(</span><span class=n>1</span><span class=p>));</span></span></span></code></pre></td></tr></table></div></div></div></div><p>现象：<code>b连接</code>断开，<code>a连接</code>也断开</p><p>tcp抓包日志截图如下，会发现<code>proxyServer/proxyClient</code>向<code>backendServer</code>发送了<code>FIN</code>，所以<code>b连接</code>断开，也向<code>user</code>发送<code>FIN</code>，所以<code>a连接</code>也断开。</p><p><div class="img-box loading" style=aspect-ratio:2551/611;max-width:2551px;max-height:611px><img data-src=index/image-20250608140344557.png width=2551 height=611></div></p><h2 id=22-思考>2.2 思考</h2><h3 id=221-handlerwrite与pipeto的区别>2.2.1 handler..write与pipeTo的区别</h3><p>为啥<code>handler..write</code>与<code>pipeTo</code>的结果不同呢？这就需要跟一下<code>pipeTo</code>源码了。</p><p><div class="img-box loading" style=aspect-ratio:1339/800;max-width:1339px;max-height:800px><img data-src=index/image-20250608161142004.png width=1339 height=800></div></p><p>原因在于<code>pipeTo</code>内部给源头连接注册了<code>endHandler</code>和<code>exceptionHandler</code>，当监听到如上事件时，会默认将对端连接也进行<code>end()</code>。</p><blockquote><p>由于<code>io.vertx.core.streams.Pipe</code>的实现类<code>io.vertx.core.streams.impl.PipeImpl</code>逻辑不复杂，跟别的模块代码也并没有强耦合，因此我们可以自己复制一份<code>DiyPipe</code>出来，以供自己调试。</p></blockquote><p>那么<code>pipeTo</code>到底做了哪些东西呢？这个可以将其使用<code>handler..write</code>来实现出来。<code>a.pipeTo(b).onComplete(completion)</code>就相当于如下代码</p><div class=code-block><div class=code-block-header><span class=code-lang>java</span>
+<span class=code-copy><svg width="1em" height="1em" fill="none" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M21 3.5V17a2 2 0 01-2 2h-2v-2h2V3.5H9v2h5.857c1.184.0 2.143.895 2.143 2v13c0 1.105-.96 2-2.143 2H5.143C3.959 22.5 3 21.605 3 20.5v-13c0-1.105.96-2 2.143-2H7v-2a2 2 0 012-2h10a2 2 0 012 2m-6.143 4H5.143v13h9.714z" clip-rule="evenodd"/></svg></span></div><div class=code-block-content><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=n>a</span><span class=p>.</span><span class=na>resume</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>a</span><span class=p>.</span><span class=na>handler</span><span class=p>(</span><span class=n>buf</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>b</span><span class=p>.</span><span class=na>write</span><span class=p>(</span><span class=n>buf</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=k>if</span><span class=w> </span><span class=p>(</span><span class=n>b</span><span class=p>.</span><span class=na>writeQueueFull</span><span class=p>())</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>a</span><span class=p>.</span><span class=na>pause</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>b</span><span class=p>.</span><span class=na>drainHandler</span><span class=p>(</span><span class=n>t</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=n>a</span><span class=p>.</span><span class=na>resume</span><span class=p>());</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>});</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>a</span><span class=p>.</span><span class=na>endHandler</span><span class=p>(</span><span class=n>v</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>a</span><span class=p>.</span><span class=na>handler</span><span class=p>(</span><span class=kc>null</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>a</span><span class=p>.</span><span class=na>endHandler</span><span class=p>(</span><span class=kc>null</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>a</span><span class=p>.</span><span class=na>exceptionHandler</span><span class=p>(</span><span class=kc>null</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>b</span><span class=p>.</span><span class=na>end</span><span class=p>().</span><span class=na>onComplete</span><span class=p>(</span><span class=n>completion</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>});</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>a</span><span class=p>.</span><span class=na>exceptionHandler</span><span class=p>(</span><span class=n>e</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>a</span><span class=p>.</span><span class=na>handler</span><span class=p>(</span><span class=kc>null</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>a</span><span class=p>.</span><span class=na>endHandler</span><span class=p>(</span><span class=kc>null</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>a</span><span class=p>.</span><span class=na>exceptionHandler</span><span class=p>(</span><span class=kc>null</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>b</span><span class=p>.</span><span class=na>end</span><span class=p>().</span><span class=na>onComplete</span><span class=p>(</span><span class=n>v</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=n>completion</span><span class=p>.</span><span class=na>handle</span><span class=p>(</span><span class=n>Future</span><span class=p>.</span><span class=na>failedFuture</span><span class=p>(</span><span class=n>e</span><span class=p>)));</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>});</span></span></span></code></pre></td></tr></table></div></div></div></div><p>在此也提一个插曲，之前发现了一个tcp反向代理的bug</p><ul><li><a href=https://github.com/meethigher/tcp-reverse-proxy/issues/6>TCP反向代理在反代HTTP短连接服务时，出现io.netty.channel.StacklessClosedChannelException · Issue #6 · meethigher/tcp-reverse-proxy</a></li><li><a href=https://github.com/meethigher/bug-test/tree/vertx-tcp-proxy-closed>meethigher/bug-test at vertx-tcp-proxy-closed</a></li></ul><p>这个问题其实挺傻逼的，用了pipeTo这个api，连接的生命周期已经双向绑定了，而我又进行了再次绑定，进而导致关了又关的问题。</p><h3 id=222-endhandlerclosehandler区别>2.2.2 endHandler()/closeHandler()区别</h3><p>在Vertx中，end和close主要用于区分半关闭和全关闭的状态。</p><p>以NetSocket为例，end底层调用了close，因此调用end()和调用close()的作用是一致的。</p><p>但是endHandler()和closeHandler()是严格不一样的。可以通过源码查看对应的触发时机，明显是endHandler()会比closeHandler()触发更靠前。</p><p><div class="img-box loading" style=aspect-ratio:1200/617;max-width:1200px;max-height:617px><img data-src=index/image-20250608180949468.png width=1200 height=617></div></p><h2 id=23-promise用法示例>2.3 Promise用法示例</h2><p>常规使用示例</p><div class=code-block><div class=code-block-header><span class=code-lang>java</span>
+<span class=code-copy><svg width="1em" height="1em" fill="none" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M21 3.5V17a2 2 0 01-2 2h-2v-2h2V3.5H9v2h5.857c1.184.0 2.143.895 2.143 2v13c0 1.105-.96 2-2.143 2H5.143C3.959 22.5 3 21.605 3 20.5v-13c0-1.105.96-2 2.143-2H7v-2a2 2 0 012-2h10a2 2 0 012 2m-6.143 4H5.143v13h9.714z" clip-rule="evenodd"/></svg></span></div><div class=code-block-content><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span><span class=lnt>36
+</span><span class=lnt>37
+</span><span class=lnt>38
+</span><span class=lnt>39
+</span><span class=lnt>40
+</span><span class=lnt>41
+</span><span class=lnt>42
+</span><span class=lnt>43
+</span><span class=lnt>44
+</span><span class=lnt>45
+</span><span class=lnt>46
+</span><span class=lnt>47
+</span><span class=lnt>48
+</span><span class=lnt>49
+</span><span class=lnt>50
+</span><span class=lnt>51
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>io.vertx.core.*</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.slf4j.Logger</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.slf4j.LoggerFactory</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>java.util.concurrent.ThreadLocalRandom</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>java.util.concurrent.locks.LockSupport</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kd>public</span><span class=w> </span><span class=kd>class</span> <span class=nc>PromiseUsage</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>private</span><span class=w> </span><span class=kd>static</span><span class=w> </span><span class=kd>final</span><span class=w> </span><span class=n>Vertx</span><span class=w> </span><span class=n>vertx</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>Vertx</span><span class=p>.</span><span class=na>vertx</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>private</span><span class=w> </span><span class=kd>static</span><span class=w> </span><span class=kd>final</span><span class=w> </span><span class=n>Logger</span><span class=w> </span><span class=n>log</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>LoggerFactory</span><span class=p>.</span><span class=na>getLogger</span><span class=p>(</span><span class=n>PromiseUsage</span><span class=p>.</span><span class=na>class</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=kd>static</span><span class=w> </span><span class=n>Future</span><span class=o>&lt;</span><span class=n>String</span><span class=o>&gt;</span><span class=w> </span><span class=nf>getFuture</span><span class=p>()</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=c1>// Promise用法</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=kd>final</span><span class=w> </span><span class=n>Promise</span><span class=o>&lt;</span><span class=n>String</span><span class=o>&gt;</span><span class=w> </span><span class=n>promise</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>Promise</span><span class=p>.</span><span class=na>promise</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>vertx</span><span class=p>.</span><span class=na>setTimer</span><span class=p>(</span><span class=n>5000</span><span class=p>,</span><span class=w> </span><span class=n>id</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>if</span><span class=w> </span><span class=p>(</span><span class=n>ThreadLocalRandom</span><span class=p>.</span><span class=na>current</span><span class=p>().</span><span class=na>nextBoolean</span><span class=p>())</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>promise</span><span class=p>.</span><span class=na>complete</span><span class=p>(</span><span class=s>&#34;succeed&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>}</span><span class=w> </span><span class=k>else</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>promise</span><span class=p>.</span><span class=na>fail</span><span class=p>(</span><span class=s>&#34;failed&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>});</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>return</span><span class=w> </span><span class=n>promise</span><span class=p>.</span><span class=na>future</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=kd>static</span><span class=w> </span><span class=kt>void</span><span class=w> </span><span class=nf>main</span><span class=p>(</span><span class=n>String</span><span class=o>[]</span><span class=w> </span><span class=n>args</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>Handler</span><span class=o>&lt;</span><span class=n>AsyncResult</span><span class=o>&lt;</span><span class=n>String</span><span class=o>&gt;&gt;</span><span class=w> </span><span class=n>completion</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>ar</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>if</span><span class=w> </span><span class=p>(</span><span class=n>ar</span><span class=p>.</span><span class=na>succeeded</span><span class=p>())</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>log</span><span class=p>.</span><span class=na>info</span><span class=p>(</span><span class=s>&#34;test succeed&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>}</span><span class=w> </span><span class=k>else</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>log</span><span class=p>.</span><span class=na>error</span><span class=p>(</span><span class=s>&#34;test failed&#34;</span><span class=p>,</span><span class=w> </span><span class=n>ar</span><span class=p>.</span><span class=na>cause</span><span class=p>());</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>};</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>getFuture</span><span class=p>().</span><span class=na>onComplete</span><span class=p>(</span><span class=n>completion</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>getFuture</span><span class=p>().</span><span class=na>onComplete</span><span class=p>(</span><span class=n>v</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>completion</span><span class=p>.</span><span class=na>handle</span><span class=p>(</span><span class=n>Future</span><span class=p>.</span><span class=na>failedFuture</span><span class=p>(</span><span class=k>new</span><span class=w> </span><span class=n>RuntimeException</span><span class=p>(</span><span class=s>&#34;hh&#34;</span><span class=p>)));</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>});</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>for</span><span class=w> </span><span class=p>(</span><span class=kt>int</span><span class=w> </span><span class=n>i</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>0</span><span class=p>;</span><span class=w> </span><span class=n>i</span><span class=w> </span><span class=o>&lt;</span><span class=w> </span><span class=n>10</span><span class=p>;</span><span class=w> </span><span class=n>i</span><span class=o>++</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>getFuture</span><span class=p>().</span><span class=na>onComplete</span><span class=p>(</span><span class=n>ar</span><span class=w> </span><span class=o>-&gt;</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=k>if</span><span class=w> </span><span class=p>(</span><span class=n>ar</span><span class=p>.</span><span class=na>succeeded</span><span class=p>())</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                    </span><span class=n>log</span><span class=p>.</span><span class=na>info</span><span class=p>(</span><span class=s>&#34;future completed&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=p>}</span><span class=w> </span><span class=k>else</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                    </span><span class=n>log</span><span class=p>.</span><span class=na>error</span><span class=p>(</span><span class=s>&#34;future failed&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>});</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>LockSupport</span><span class=p>.</span><span class=na>park</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>}</span></span></span></code></pre></td></tr></table></div></div></div></div></div><div class=single-nav><div class=item onclick='this.querySelector("a").click()'><div class=item-key>Previous</div><a class=item-value href=/2024/post-1/>这是一个超级超级超级超级超级超级超级超级超级超级超级超级超级超级超级超级超级超级超级超级超级长的标题</a></div><div class=item onclick='this.querySelector("a").click()'><div class=item-key>Next</div><a class=item-value href=/2026/post-7/>Post 7</a></div></div><div class=single-btn><button class=btn id=rewardBtn>Donate</button>
+<button class=btn id=shareBtn>Share</button></div><div id=single-gitalk></div><link rel=stylesheet href=/css/gitalk-theme.min.css><script src=/js/gitalk.min.js></script><script>(function(){const e=new Gitalk({clientID:"e46f6dec7c07145c652c",clientSecret:"d1a0b627f9b76d21bd3080d1777d0aa0ad55dd83",accessToken:"6a2f4d91a1f188a2089e70c2a7b63628f3e9e664",repo:"gitalk",owner:"gitalk",admin:["booxood","mamborer"],id:"Demo"});e.render("single-gitalk")})()</script></div><div class=single-right id=toc><div class=toc-title>Outline</div><nav id=TableOfContents><ul><li><a href=#一背景>一、背景</a></li><li><a href=#二实践>二、实践</a><ul><li><a href=#21-实现>2.1 实现</a><ul><li><a href=#211-handlerwrite>2.1.1 handler..write</a></li><li><a href=#212-pipeto>2.1.2 pipeTo</a></li></ul></li><li><a href=#22-思考>2.2 思考</a><ul><li><a href=#221-handlerwrite与pipeto的区别>2.2.1 handler..write与pipeTo的区别</a></li><li><a href=#222-endhandlerclosehandler区别>2.2.2 endHandler()/closeHandler()区别</a></li></ul></li><li><a href=#23-promise用法示例>2.3 Promise用法示例</a></li></ul></li></ul></nav></div></div></div></main><footer><div class=footer-container><div class=info><div class=item title="Unique visitors on this page (IP deduplicated)" id=stats aria-expanded=false><div class=item-key>Visitors</div><div class=item-value id=statsValue>99</div></div><div class=item title="2019/09/15 19:57:09 Time running until now"><div class=item-key>Uptime</div><div class=item-value id=timeValue data-site-begin="2019/09/15 19:57:09"><span id=timeYear>99</span><span> y </span><span id=timeDay>99</span><span> d </span><span id=timeHour>99</span><span> h</span></div></div></div></div></footer><div><div class=starry id=starry></div><div id=progressContainer><div id=progressBar></div></div><div class=sidebar-tools id=sidebarTools aria-expanded=false><button class=tool-btn id=searchBtn aria-label=Search>
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><title>Search</title><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+</button>
+<button class=tool-btn id=themeToggle aria-label="Toggle theme">
+<svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><title>Sun mode</title><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+<svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><title>Moon mode</title><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+</button>
+<button class=tool-btn id=scrollToTop aria-label="Scroll to top">
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><title>Scroll to top</title><path d="M18 15l-6-6-6 6"/></svg>
+</button>
+<button class=tool-btn id=scrollToBottom aria-label="Scroll to bottom">
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><title>Scroll to bottom</title><path d="M6 9l6 6 6-6"/></svg>
+</button>
+<button class=tool-btn id=toolMenuSwitcher aria-label="Expand/Collapse toolbar">
+<svg class="expand-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><title>Expand toolbar</title><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+<svg class="collapse-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><title>Collapse toolbar</title><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class=interaction><div class="toast toast-success" id=shareBtnToastSuccess><span>Link copied successfully</span></div><div class="toast toast-error" id=shareBtnToastError><span>Failed to copy the link. Please try again or use a different browser</span></div><div class="toast toast-success" id=codeCopyToastSuccess><span>Copied successfully</span></div><div class="toast toast-success" id=codeCopyToastError><span>Copy failed. Please try again or use a different browser</span></div><div class=modal-overlay id=rewardBtnModal><button class=modal-close>×</button><div class=modal-content><div class=modal-title>Thank you for your support</div><div class=model-subtitle>Scan the QR code to support the author</div><img src=/reward.jpg class=qrcode><div class=modal-note>If this article helps, consider tipping using its title as a note</div></div></div><div class=modal-overlay id=searchBtnModal><button class=modal-close>×</button><div class=search-content><div class=search-header><input class=search-input id=searchInput placeholder="Enter keywords to search..." autocomplete=off></div><div class=search-result><div class=state-loading id=stateLoading>Building index library...</div><div class="state-idle search-active" id=stateIdle>Please enter keywords to start searching</div><div class=state-empty id=stateEmpty>No matching results found</div><div class=state-searching id=stateSearching>Searching...</div><div class=result-inner id=result></div></div></div></div></div></div><script src=/js/viewer.min.js></script><script src=/js/main.min.js></script><script>(function(){const e=window.Starry.prototype.varConfiguration;e.varSearchIndex="/index.json",e.varProgressEnable="true",e.varStarCount="50",e.varStarBgEnable="true",e.varSiteBegin="2019/09/15 19:57:09",e.varStatsServiceUrl="https://meethigher.top/census/count"})()</script></body></html>
